@@ -290,17 +290,12 @@ func TestGateway_ProcessLoop_WithContentBlocks(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus(10)
-	blocks := []model.ContentBlock{
-		{
-			Type: model.ContentBlockText,
-			Text: "caption text",
-		},
-		{
-			Type:      model.ContentBlockImage,
-			MediaType: "image/jpeg",
-			Data:      base64.StdEncoding.EncodeToString([]byte{0xff, 0xd8, 0xff, 0xd9}),
-		},
+	imgBlock := model.ContentBlock{
+		Type:      model.ContentBlockImage,
+		MediaType: "image/jpeg",
+		Data:      base64.StdEncoding.EncodeToString([]byte{0xff, 0xd8, 0xff, 0xd9}),
 	}
+	blocks := []model.ContentBlock{imgBlock}
 	reqCh := make(chan api.Request, 1)
 	mockRt := &mockRuntime{
 		reqCh: reqCh,
@@ -330,19 +325,22 @@ func TestGateway_ProcessLoop_WithContentBlocks(t *testing.T) {
 
 	select {
 	case req := <-reqCh:
-		if req.Prompt != "caption text" {
-			t.Errorf("runtime prompt = %q, want caption text", req.Prompt)
+		// Workaround merges prompt into ContentBlocks and clears Prompt
+		if req.Prompt != "" {
+			t.Errorf("runtime prompt = %q, want empty (merged into ContentBlocks)", req.Prompt)
 		}
 		if req.SessionID != "telegram:456" {
 			t.Errorf("runtime sessionID = %q, want telegram:456", req.SessionID)
 		}
-		if len(req.ContentBlocks) != len(blocks) {
-			t.Fatalf("runtime content blocks len = %d, want %d", len(req.ContentBlocks), len(blocks))
+		// Expect 2 blocks: prepended text + original image
+		if len(req.ContentBlocks) != 2 {
+			t.Fatalf("runtime content blocks len = %d, want 2", len(req.ContentBlocks))
 		}
-		for i := range blocks {
-			if req.ContentBlocks[i] != blocks[i] {
-				t.Fatalf("runtime content block[%d] = %+v, want %+v", i, req.ContentBlocks[i], blocks[i])
-			}
+		if req.ContentBlocks[0].Type != model.ContentBlockText || req.ContentBlocks[0].Text != "caption text" {
+			t.Errorf("content block[0] = %+v, want text 'caption text'", req.ContentBlocks[0])
+		}
+		if req.ContentBlocks[1] != imgBlock {
+			t.Errorf("content block[1] = %+v, want image block", req.ContentBlocks[1])
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for runtime request")

@@ -194,8 +194,13 @@ func (t *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 			if mediaType == "" {
 				mediaType = "application/octet-stream"
 			}
+			// Use image block type for image MIME types sent as documents
+			blockType := model.ContentBlockDocument
+			if strings.HasPrefix(mediaType, "image/") {
+				blockType = model.ContentBlockImage
+			}
 			contentBlocks = append(contentBlocks, model.ContentBlock{
-				Type:      model.ContentBlockDocument,
+				Type:      blockType,
 				MediaType: mediaType,
 				Data:      base64.StdEncoding.EncodeToString(data),
 			})

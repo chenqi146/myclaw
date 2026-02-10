@@ -211,9 +211,19 @@ func (g *Gateway) buildSystemPrompt() string {
 }
 
 func (g *Gateway) runAgent(ctx context.Context, prompt, sessionID string, contentBlocks []model.ContentBlock) (string, error) {
+	// Workaround: agentsdk-go drops Prompt when ContentBlocks exist (anthropic.go:420-431).
+	// Merge text prompt into ContentBlocks so both text and media reach the API.
+	blocks := contentBlocks
+	if len(contentBlocks) > 0 && strings.TrimSpace(prompt) != "" {
+		blocks = make([]model.ContentBlock, 0, len(contentBlocks)+1)
+		blocks = append(blocks, model.ContentBlock{Type: model.ContentBlockText, Text: prompt})
+		blocks = append(blocks, contentBlocks...)
+		prompt = "" // clear to avoid duplication if SDK is fixed later
+	}
+
 	resp, err := g.runtime.Run(ctx, api.Request{
 		Prompt:        prompt,
-		ContentBlocks: contentBlocks,
+		ContentBlocks: blocks,
 		SessionID:     sessionID,
 	})
 	if err != nil {
