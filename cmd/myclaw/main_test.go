@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cexll/agentsdk-go/pkg/api"
+	runtimeskills "github.com/cexll/agentsdk-go/pkg/runtime/skills"
 	"github.com/spf13/cobra"
 	"github.com/stellarlinkco/myclaw/internal/config"
 	"github.com/stellarlinkco/myclaw/internal/memory"
@@ -47,6 +50,53 @@ func TestWriteIfNotExists_ExistingFile(t *testing.T) {
 	if string(data) != "original" {
 		t.Errorf("content = %q, want 'original'", string(data))
 	}
+}
+
+func captureRunOutput(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+
+	runErr := fn()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String(), runErr
+}
+
+func writeSkillFile(t *testing.T, workspaceDir, skillName, description string) string {
+	t.Helper()
+	skillDir := filepath.Join(workspaceDir, "skills", skillName)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	content := fmt.Sprintf(`---
+name: %s
+description: %s
+keywords: [write, draft]
+---
+# %s
+Use this skill for writing tasks.
+`, skillName, description, skillName)
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+	return skillPath
+}
+
+func buildJSONCommand() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("json", false, "")
+	_ = cmd.Flags().Set("json", "true")
+	return cmd
 }
 
 func TestBuildSystemPrompt(t *testing.T) {
@@ -162,6 +212,10 @@ func TestRunOnboard(t *testing.T) {
 	if _, err := os.Stat(wsPath); os.IsNotExist(err) {
 		t.Error("workspace was not created")
 	}
+	skillsPath := filepath.Join(wsPath, "skills")
+	if _, err := os.Stat(skillsPath); os.IsNotExist(err) {
+		t.Error("skills directory was not created")
+	}
 
 	// Check output contains expected text
 	if !strings.Contains(output, "Created config") && !strings.Contains(output, "Config already exists") {
@@ -255,6 +309,9 @@ func TestRunStatus(t *testing.T) {
 	}
 	if !strings.Contains(output, "WeCom: enabled=") {
 		t.Errorf("missing WeCom status in output: %s", output)
+	}
+	if !strings.Contains(output, "Skills: enabled=") {
+		t.Errorf("missing Skills status in output: %s", output)
 	}
 }
 
@@ -412,6 +469,379 @@ func TestRunStatus_WorkspaceNotFound(t *testing.T) {
 	}
 }
 
+func TestRunSkillsList(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	writeSkillFile(t, cfg.Agent.Workspace, "writer", "writing helper")
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsList(&cobra.Command{}, []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsList error: %v", runErr)
+	}
+	if !strings.Contains(output, "Loaded skills: 1") {
+		t.Errorf("expected loaded skills count in output: %s", output)
+	}
+	if !strings.Contains(output, "- writer: writing helper") {
+		t.Errorf("expected writer skill in output: %s", output)
+	}
+}
+
+func TestRunSkillsList_JSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	writeSkillFile(t, cfg.Agent.Workspace, "writer", "writing helper")
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsList(buildJSONCommand(), []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsList json error: %v", runErr)
+	}
+
+	var payload struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		Command       string `json:"command"`
+		OK            bool   `json:"ok"`
+		Enabled       bool   `json:"enabled"`
+		Loaded        int    `json:"loaded"`
+		Skills        []struct {
+			Name string `json:"name"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal json: %v; output=%s", err, output)
+	}
+	if payload.SchemaVersion != skillsJSONSchemaVersion {
+		t.Errorf("expected schemaVersion=%d, got %d", skillsJSONSchemaVersion, payload.SchemaVersion)
+	}
+	if payload.Command != "skills.list" {
+		t.Errorf("expected command skills.list, got %s", payload.Command)
+	}
+	if !payload.OK {
+		t.Errorf("expected ok=true, got false")
+	}
+	if !payload.Enabled {
+		t.Errorf("expected enabled=true, got false")
+	}
+	if payload.Loaded != 1 {
+		t.Errorf("expected loaded=1, got %d", payload.Loaded)
+	}
+	if len(payload.Skills) != 1 || payload.Skills[0].Name != "writer" {
+		t.Errorf("unexpected skills payload: %+v", payload.Skills)
+	}
+}
+
+func TestRunSkillsInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	skillPath := writeSkillFile(t, cfg.Agent.Workspace, "writer", "writing helper")
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsInfo(&cobra.Command{}, []string{"writer"})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsInfo error: %v", runErr)
+	}
+	if !strings.Contains(output, "Name: writer") {
+		t.Errorf("expected name in output: %s", output)
+	}
+	if !strings.Contains(output, "Description: writing helper") {
+		t.Errorf("expected description in output: %s", output)
+	}
+	if !strings.Contains(output, "Source: "+skillPath) {
+		t.Errorf("expected source path in output: %s", output)
+	}
+}
+
+func TestRunSkillsInfo_JSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	skillPath := writeSkillFile(t, cfg.Agent.Workspace, "writer", "writing helper")
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsInfo(buildJSONCommand(), []string{"writer"})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsInfo json error: %v", runErr)
+	}
+
+	var payload struct {
+		SchemaVersion int      `json:"schemaVersion"`
+		Command       string   `json:"command"`
+		OK            bool     `json:"ok"`
+		Name          string   `json:"name"`
+		Description   string   `json:"description"`
+		Source        string   `json:"source"`
+		Keywords      []string `json:"keywords"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal json: %v; output=%s", err, output)
+	}
+	if payload.SchemaVersion != skillsJSONSchemaVersion {
+		t.Errorf("expected schemaVersion=%d, got %d", skillsJSONSchemaVersion, payload.SchemaVersion)
+	}
+	if payload.Command != "skills.info" {
+		t.Errorf("expected command skills.info, got %s", payload.Command)
+	}
+	if !payload.OK {
+		t.Errorf("expected ok=true, got false")
+	}
+	if payload.Name != "writer" {
+		t.Errorf("expected name writer, got %s", payload.Name)
+	}
+	if payload.Description != "writing helper" {
+		t.Errorf("expected description writing helper, got %s", payload.Description)
+	}
+	if payload.Source != skillPath {
+		t.Errorf("expected source %s, got %s", skillPath, payload.Source)
+	}
+	if len(payload.Keywords) == 0 {
+		t.Errorf("expected keywords in payload")
+	}
+}
+
+func TestRunSkillsCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsCheck(&cobra.Command{}, []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsCheck error: %v", runErr)
+	}
+	if !strings.Contains(output, "Skill folders: 0") {
+		t.Errorf("expected folder count in output: %s", output)
+	}
+	if !strings.Contains(output, "Loaded skills: 0") {
+		t.Errorf("expected loaded count in output: %s", output)
+	}
+	if !strings.Contains(output, "Result: ok") {
+		t.Errorf("expected ok result in output: %s", output)
+	}
+}
+
+func TestRunSkillsCheck_JSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsCheck(buildJSONCommand(), []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsCheck json error: %v", runErr)
+	}
+
+	var payload struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		Command       string `json:"command"`
+		OK            bool   `json:"ok"`
+		Result        string `json:"result"`
+		SkillFolder   int    `json:"skillFolders"`
+		Loaded        int    `json:"loaded"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal json: %v; output=%s", err, output)
+	}
+	if payload.SchemaVersion != skillsJSONSchemaVersion {
+		t.Errorf("expected schemaVersion=%d, got %d", skillsJSONSchemaVersion, payload.SchemaVersion)
+	}
+	if payload.Command != "skills.check" {
+		t.Errorf("expected command skills.check, got %s", payload.Command)
+	}
+	if !payload.OK {
+		t.Errorf("expected ok=true, got false")
+	}
+	if payload.Result != "ok" {
+		t.Errorf("expected result ok, got %s", payload.Result)
+	}
+	if payload.SkillFolder != 0 {
+		t.Errorf("expected skillFolders=0, got %d", payload.SkillFolder)
+	}
+	if payload.Loaded != 0 {
+		t.Errorf("expected loaded=0, got %d", payload.Loaded)
+	}
+}
+
+func TestRunSkillsCheck_MissingSkillFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("MYCLAW_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	if err := runOnboard(&cobra.Command{}, []string{}); err != nil {
+		t.Fatalf("runOnboard error: %v", err)
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	brokenDir := filepath.Join(cfg.Agent.Workspace, "skills", "broken")
+	if err := os.MkdirAll(brokenDir, 0755); err != nil {
+		t.Fatalf("mkdir broken skill dir: %v", err)
+	}
+
+	output, runErr := captureRunOutput(t, func() error {
+		return runSkillsCheck(&cobra.Command{}, []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("runSkillsCheck error: %v", runErr)
+	}
+	if !strings.Contains(output, "Missing SKILL.md: broken") {
+		t.Errorf("expected missing SKILL.md warning, got: %s", output)
+	}
+	if !strings.Contains(output, "Loaded skills: 0") {
+		t.Errorf("expected loaded skills 0, got: %s", output)
+	}
+}
+
+func TestLoadRuntimeSkills_Disabled(t *testing.T) {
+	cfg := &config.Config{
+		Agent: config.AgentConfig{
+			Workspace: t.TempDir(),
+		},
+		Skills: config.SkillsConfig{
+			Enabled: false,
+		},
+	}
+
+	got := loadRuntimeSkills(cfg)
+	if len(got) != 0 {
+		t.Fatalf("expected no skills when disabled, got %d", len(got))
+	}
+}
+
+func TestLoadRuntimeSkills_LoadsAndWorks(t *testing.T) {
+	workspaceDir := t.TempDir()
+	writeSkillFile(t, workspaceDir, "writer", "writing helper")
+
+	cfg := &config.Config{
+		Agent: config.AgentConfig{
+			Workspace: workspaceDir,
+		},
+		Skills: config.SkillsConfig{
+			Enabled: true,
+		},
+	}
+
+	got := loadRuntimeSkills(cfg)
+	if len(got) != 1 {
+		t.Fatalf("expected one loaded skill, got %d", len(got))
+	}
+	if got[0].Definition.Name != "writer" {
+		t.Fatalf("expected loaded skill writer, got %s", got[0].Definition.Name)
+	}
+	result, err := got[0].Handler.Execute(context.Background(), runtimeskills.ActivationContext{
+		Prompt: "please draft",
+	})
+	if err != nil {
+		t.Fatalf("execute loaded skill handler: %v", err)
+	}
+	output, ok := result.Output.(string)
+	if !ok {
+		t.Fatalf("expected string output, got %T", result.Output)
+	}
+	if !strings.Contains(output, "Use this skill for writing tasks.") {
+		t.Fatalf("unexpected skill output: %s", output)
+	}
+}
+
+func TestLoadRuntimeSkills_InvalidDirReturnsEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	notDirPath := filepath.Join(tmpDir, "not-dir")
+	if err := os.WriteFile(notDirPath, []byte("x"), 0644); err != nil {
+		t.Fatalf("write not-dir file: %v", err)
+	}
+
+	cfg := &config.Config{
+		Agent: config.AgentConfig{
+			Workspace: tmpDir,
+		},
+		Skills: config.SkillsConfig{
+			Enabled: true,
+			Dir:     notDirPath,
+		},
+	}
+
+	got := loadRuntimeSkills(cfg)
+	if len(got) != 0 {
+		t.Fatalf("expected no skills on invalid dir, got %d", len(got))
+	}
+}
+
 func TestInit(t *testing.T) {
 	// Verify init() sets up commands correctly
 	if rootCmd == nil {
@@ -428,6 +858,18 @@ func TestInit(t *testing.T) {
 	}
 	if statusCmd == nil {
 		t.Error("statusCmd should not be nil")
+	}
+	if skillsCmd == nil {
+		t.Error("skillsCmd should not be nil")
+	}
+	if skillsListCmd == nil {
+		t.Error("skillsListCmd should not be nil")
+	}
+	if skillsInfoCmd == nil {
+		t.Error("skillsInfoCmd should not be nil")
+	}
+	if skillsCheckCmd == nil {
+		t.Error("skillsCheckCmd should not be nil")
 	}
 
 	// Check message flag exists

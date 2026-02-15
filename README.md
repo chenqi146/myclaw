@@ -24,6 +24,9 @@ Personal AI assistant built on [agentsdk-go](https://github.com/cexll/agentsdk-g
 # Build
 make build
 
+# Build smaller release binary
+make build-release
+
 # Interactive config setup
 make setup
 
@@ -48,6 +51,9 @@ make gateway
 | Target | Description |
 |--------|-------------|
 | `make build` | Build binary |
+| `make build-release` | Build optimized binary with `-trimpath -ldflags="-s -w"` |
+| `make package` | Package optimized binary to `dist/myclaw-<os>-<arch>.gz` |
+| `make package-all` | Package optimized binaries for `darwin/arm64 linux/amd64 linux/arm64` |
 | `make run` | Run agent REPL |
 | `make gateway` | Start gateway (channels + cron + heartbeat) |
 | `make onboard` | Initialize config and workspace |
@@ -61,6 +67,25 @@ make gateway
 | `make docker-up-tunnel` | Docker start with cloudflared tunnel |
 | `make docker-down` | Docker stop |
 | `make lint` | Run golangci-lint |
+
+## Binary Packaging
+
+```bash
+# Smaller binary for release
+make build-release
+
+# Create compressed package (.gz)
+make package
+
+# Build and package default multi-platform artifacts
+make package-all
+
+# Or customize target platforms
+make package-all PLATFORMS="linux/amd64 linux/arm64"
+```
+
+`make package` creates a single archive `dist/myclaw-<os>-<arch>.gz`.
+`make package-all` creates multiple archives under `dist/`, suitable for release distribution and low-bandwidth deployment.
 
 ## Architecture
 
@@ -135,6 +160,7 @@ docs/
 scripts/
   setup.sh           Interactive config generator
 workspace/
+  skills/            Optional custom skills (`SKILL.md`)
   AGENTS.md          Agent system prompt
   SOUL.md            Agent personality
 ```
@@ -183,6 +209,10 @@ Run `make setup` for interactive config, or copy `config.example.json` to `~/.my
       "enabled": true,
       "allowFrom": []
     }
+  },
+  "skills": {
+    "enabled": true,
+    "dir": ""
   }
 }
 ```
@@ -212,6 +242,59 @@ When using OpenAI, set the model to an OpenAI model name (e.g., `gpt-4o`).
 | `MYCLAW_WECOM_RECEIVE_ID` | Optional receive ID for strict decrypt validation |
 
 > Prefer environment variables over config files for sensitive values like API keys.
+
+### Skills
+
+`myclaw` supports local skills loaded from `SKILL.md` files.
+
+- `skills.enabled`: enable or disable skills (default `true`)
+- `skills.dir`: custom skills directory; empty means `<agent.workspace>/skills`
+- `myclaw onboard` automatically creates the default skills directory
+
+Skill layout:
+
+```text
+<workspace>/skills/<skill-name>/SKILL.md
+```
+
+Minimal `SKILL.md` example:
+
+```markdown
+---
+name: writer
+description: writing helper
+keywords: [write, draft]
+---
+# Writer
+Use this skill for writing tasks.
+```
+
+After changing skills, restart `myclaw gateway` to apply updates.
+
+Skill diagnostics:
+
+```bash
+./myclaw skills list
+./myclaw skills info writer
+./myclaw skills check
+./myclaw skills list --json
+```
+
+JSON contract (stable):
+
+- Common fields for all `--json` outputs:
+  - `schemaVersion` (int, currently `1`)
+  - `command` (`skills.list` | `skills.info` | `skills.check`)
+  - `ok` (bool)
+- `skills list --json`:
+  - `enabled`, `dir`, `loaded`, `skills[]`
+  - `skills[]` item: `name`, `description`, `keywords[]`
+- `skills info <name> --json`:
+  - `name`, `description`, `dir`, `keywords[]`, `source`, `preview`
+  - optional: `handlerError`
+- `skills check --json`:
+  - `enabled`, `dir`, `skillFolders`, `loaded`, `missingSkillMD[]`, `result`
+  - optional: `note`
 
 ## Channel Setup
 

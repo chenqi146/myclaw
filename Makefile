@@ -1,13 +1,39 @@
-.PHONY: build run gateway tunnel test setup clean docker-up docker-down lint
+.PHONY: build build-release package package-all run gateway tunnel test setup clean docker-up docker-down lint
 
 BINARY    := myclaw
 BUILD_DIR := .
 CONFIG    := $(HOME)/.myclaw/config.json
 FEISHU_PORT ?= 9876
+DIST_DIR  := dist
+RELEASE_LDFLAGS := -s -w
+PLATFORMS ?= darwin/arm64 linux/amd64 linux/arm64
 
 ## Build
 build:
 	go build -o $(BINARY) ./cmd/myclaw
+
+## Build optimized release binary (smaller size)
+build-release:
+	go build -trimpath -ldflags="$(RELEASE_LDFLAGS)" -o $(BINARY) ./cmd/myclaw
+
+## Package optimized binary (gzip)
+package: build-release
+	@mkdir -p $(DIST_DIR)
+	@os=$$(go env GOOS); arch=$$(go env GOARCH); out="$(DIST_DIR)/$(BINARY)-$$os-$$arch"; \
+	cp $(BINARY) "$$out"; \
+	gzip -f -9 "$$out"; \
+	ls -lh "$$out.gz"
+
+## Package optimized binaries for multiple platforms
+package-all:
+	@mkdir -p $(DIST_DIR)
+	@set -e; for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; out="$(DIST_DIR)/$(BINARY)-$$os-$$arch"; \
+		echo "Building $$os/$$arch..."; \
+		GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="$(RELEASE_LDFLAGS)" -o "$$out" ./cmd/myclaw; \
+		gzip -f -9 "$$out"; \
+		ls -lh "$$out.gz"; \
+	done
 
 ## Run agent REPL
 run: build
@@ -75,6 +101,9 @@ help:
 	@echo "myclaw Makefile targets:"
 	@echo ""
 	@echo "  build           Build binary"
+	@echo "  build-release   Build optimized release binary"
+	@echo "  package         Package optimized binary as .gz"
+	@echo "  package-all     Package optimized binaries for multiple platforms"
 	@echo "  run             Run agent REPL"
 	@echo "  gateway         Start gateway (channels + cron)"
 	@echo "  onboard         Initialize config and workspace"

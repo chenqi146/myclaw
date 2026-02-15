@@ -76,6 +76,17 @@ else
     WECOM_PORT="9886"
 fi
 
+# Skills
+echo ""
+echo "--- Skills ---"
+read -rp "Enable skills? [Y/n]: " SKILLS_ENABLED
+if [[ "$SKILLS_ENABLED" =~ ^[Nn]$ ]]; then
+    SKILLS_ENABLED="false"
+else
+    SKILLS_ENABLED="true"
+fi
+read -rp "Skills directory (leave empty for default workspace/skills): " SKILLS_DIR
+
 # Write config
 mkdir -p "$CONFIG_DIR"
 
@@ -122,6 +133,10 @@ cat > "$CONFIG_FILE" <<EOF_JSON
     "braveApiKey": "",
     "execTimeout": 60,
     "restrictToWorkspace": true
+  },
+  "skills": {
+    "enabled": ${SKILLS_ENABLED},
+    "dir": "${SKILLS_DIR}"
   },
   "gateway": {
     "host": "0.0.0.0",
